@@ -36,10 +36,9 @@ public class ListShopServiceImpl implements ListShopService {
     }
 
     private ListShopResponse getListShopWithPagination(ListShopRequest request) {
-        ShopEntityRequest entityRequest = new ShopEntityRequest();
+        ShopEntityRequest entityRequest = mapToEntityRequest(request);
         entityRequest.setPageNumber(request.getPagination().getPage());
         entityRequest.setPageSize(request.getPagination().getSize());
-        entityRequest.setName(request.getSearch());
 
         Page<Shop> shops = shopRepository.findWithPagination(entityRequest);
 
@@ -55,15 +54,22 @@ public class ListShopServiceImpl implements ListShopService {
     }
 
     private List<ShopDto> getShops(ListShopRequest request) {
-        ShopEntityRequest shopEntityRequest = ShopEntityRequest.builder()
-                .id(request.getId())
-                .userId(request.getUserId())
-                .build();
+        ShopEntityRequest shopEntityRequest = mapToEntityRequest(request);
         Optional<List<Shop>> shops = shopRepository.find(shopEntityRequest);
         if (shops.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Shops not found");
         }
         return mapToShopDtoList(shops.get());
+    }
+
+    private ShopEntityRequest mapToEntityRequest(ListShopRequest request) {
+        return ShopEntityRequest.builder()
+                .id(request.getId())
+                .userId(request.getUserId())
+                // Map search term to both name and location for the OR group
+                .name(request.getSearch())
+                .location(request.getSearch())
+                .build();
     }
 
     public List<ShopDto> mapToShopDtoList(List<Shop> shops) {

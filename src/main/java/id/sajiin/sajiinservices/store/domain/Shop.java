@@ -8,6 +8,7 @@ import org.hibernate.annotations.DynamicUpdate;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Entity
 @Table(name = "shops")
@@ -77,6 +78,12 @@ public class Shop implements Serializable {
 
     @Column(name = "user_id")
     private Long userId;
+
+    @OneToMany(mappedBy = "shop", fetch = FetchType.LAZY)
+    private List<ShopCategory> categories;
+
+    @OneToMany(mappedBy = "shop", fetch = FetchType.LAZY)
+    private List<Product> products;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;

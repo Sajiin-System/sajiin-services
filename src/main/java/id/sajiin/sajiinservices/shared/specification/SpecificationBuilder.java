@@ -1,16 +1,15 @@
 package id.sajiin.sajiinservices.shared.specification;
 
 import jakarta.persistence.criteria.*;
+import jakarta.persistence.metamodel.Attribute;
+import jakarta.persistence.metamodel.ManagedType;
+import jakarta.persistence.metamodel.PluralAttribute;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.Objects;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Generic specification builder that creates JPA Specifications dynamically
@@ -18,7 +17,9 @@ import java.util.Objects;
  *
  * @param <T> Entity type
  */
-public class SpecificationBuilder <T> {
+public class SpecificationBuilder<T> {
+
+    private static final Map<Class<?>, List<Field>> FIELD_CACHE = new ConcurrentHashMap<>();
 
     /**
      * Build a JPA Specification from an annotated request object
@@ -79,8 +80,8 @@ public class SpecificationBuilder <T> {
         }
 
         try {
-            if (!field.canAccess(request)) {
-                field.setAccessible(true);
+            if (!field.canAccess(request) && !field.trySetAccessible()) {
+                return false;
             }
             Object value = field.get(request);
             return value instanceof Boolean && (Boolean) value;
@@ -258,15 +259,18 @@ public class SpecificationBuilder <T> {
     }
 
     /**
-     * Get all fields including inherited fields
+     * Get all fields including inherited fields, using cache
      */
     private List<Field> getAllFields(Class<?> clazz) {
-        List<Field> fields = new ArrayList<>();
-        while (clazz != null && clazz != Object.class) {
-            fields.addAll(List.of(clazz.getDeclaredFields()));
-            clazz = clazz.getSuperclass();
-        }
-        return fields;
+        return FIELD_CACHE.computeIfAbsent(clazz, c -> {
+            List<Field> fields = new ArrayList<>();
+            Class<?> current = c;
+            while (current != null && current != Object.class) {
+                fields.addAll(List.of(current.getDeclaredFields()));
+                current = current.getSuperclass();
+            }
+            return fields;
+        });
     }
 
     /**
@@ -450,7 +454,7 @@ public class SpecificationBuilder <T> {
      * Build LIKE predicate with optional case insensitivity
      */
     private Predicate buildLikePredicate(Expression<?> expression, Object value, boolean ignoreCase,
-                                        CriteriaBuilder criteriaBuilder, LikeType likeType) {
+                                         CriteriaBuilder criteriaBuilder, LikeType likeType) {
         String strValue = (String) value;
         String pattern = switch (likeType) {
             case CONTAINS -> "%" + strValue + "%";
@@ -468,22 +472,8 @@ public class SpecificationBuilder <T> {
     }
 
     /**
-     * Build BETWEEN predicate
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Predicate buildBetweenPredicate(Expression<?> expression, Object value, CriteriaBuilder criteriaBuilder) {
-        if (value instanceof List<?> list && list.size() == 2) {
-            return criteriaBuilder.between(
-                    expression.as(Comparable.class),
-                    (Comparable) list.get(0),
-                    (Comparable) list.get(1)
-            );
-        }
-        throw new IllegalArgumentException("BETWEEN operator requires a List with 2 elements");
-    }
-
-    /**
-     * Get a path expression, supporting nested paths like "category.name"
+     * Get a path expression, supporting nested paths like "category.name".
+     * Reuses existing joins and automatically joins for collection attributes.
      */
     private Expression<?> getPath(Root<T> root, String path) {
         if (path.isBlank()) {
@@ -491,17 +481,58 @@ public class SpecificationBuilder <T> {
         }
 
         String[] parts = path.split("\\.");
-        Path<?> currentPath = root;
+        Path<?> current = root;
+        From<?, ?> currentFrom = root;
 
         for (String part : parts) {
-            try {
-                currentPath = currentPath.get(part);
-            } catch (IllegalArgumentException ex) {
-                throw new IllegalArgumentException("Invalid path segment '" + part + "' in path '" + path + "'", ex);
+            // 1. Try to reuse existing join
+            jakarta.persistence.criteria.Join<?, ?> existingJoin = getExistingJoin(currentFrom, part);
+
+            if (existingJoin != null) {
+                current = existingJoin;
+                currentFrom = existingJoin;
+            } else {
+                // 2. Check if we need to auto-join (if attribute is a collection)
+                if (isCollectionAttribute(currentFrom, part)) {
+                    // Auto-join with LEFT to ensure we don't filter out parents if children are missing
+                    current = currentFrom.join(part, jakarta.persistence.criteria.JoinType.LEFT);
+                    currentFrom = (From<?, ?>) current;
+                } else {
+                    // 3. Regular path traversal
+                    current = current.get(part);
+                    if (current instanceof From) {
+                        currentFrom = (From<?, ?>) current;
+                    } else {
+                        currentFrom = null;
+                    }
+                }
             }
         }
 
-        return currentPath;
+        return current;
+    }
+
+    private jakarta.persistence.criteria.Join<?, ?> getExistingJoin(From<?, ?> from, String attributeName) {
+        if (from == null) return null;
+        for (jakarta.persistence.criteria.Join<?, ?> join : from.getJoins()) {
+            if (join.getAttribute().getName().equals(attributeName)) {
+                return join;
+            }
+        }
+        return null;
+    }
+
+    private boolean isCollectionAttribute(From<?, ?> from, String attributeName) {
+        if (from == null) return false;
+        try {
+            if (from.getModel() instanceof ManagedType<?> managedType) {
+                Attribute<?, ?> attr = managedType.getAttribute(attributeName);
+                return attr instanceof PluralAttribute;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Attribute might not be found
+        }
+        return false;
     }
 
 }
